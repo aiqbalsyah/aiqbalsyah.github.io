@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemini 4 Argon: The Model ID Is the Easy Part of Migrating · Ardiansyah Iqbal</title>
+<meta name="description" content="Google&#x27;s own migration guide shows that output caps, ignored parameters and caching changed, so a model swap needs a regression test, not a benchmark table.">
+<meta name="author" content="Ardiansyah Iqbal">
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="https://aiqbalsyah.github.io/gemini-4-argon-the-model-id-is-the-easy-part-of-migrating/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Gemini 4 Argon: The Model ID Is the Easy Part of Migrating">
+<meta property="og:description" content="Google&#x27;s own migration guide shows that output caps, ignored parameters and caching changed, so a model swap needs a regression test, not a benchmark table.">
+<meta property="og:url" content="https://aiqbalsyah.github.io/gemini-4-argon-the-model-id-is-the-easy-part-of-migrating/">
+<meta property="og:image" content="https://aiqbalsyah.github.io/gemini-4-argon-the-model-id-is-the-easy-part-of-migrating/cover.png">
+<meta property="article:published_time" content="2026-10-23">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="site"><a href="../">Ardiansyah Iqbal</a></header>
+<article>
+<h1>Gemini 4 Argon: The Model ID Is the Easy Part of Migrating</h1>
+<p class="subtitle">Google&#x27;s own migration guide shows that output caps, ignored parameters and caching changed, so a model swap needs a regression test, not a benchmark table.</p>
+<p class="meta">Ardiansyah Iqbal · <time datetime="2026-10-23">23 October 2026</time> · 11 min read</p>
+<figure class="cover"><img src="cover.png" alt="Hand-drawn sketch: Gemini 4 Argon: The Model ID Is the Easy Part of Migrating"></figure>
+<p>Google's <a
+href="https://ai.google.dev/gemini-api/docs/changelog">API changelog</a>
+calls <code>gemini-4-argon</code> "our most capable model built for
+complex coding, agentic, math, and science tasks." A ranking is the
+obvious thing to look at first.</p>
+<p>I think the more useful reading is Google's own migration guide. Its
+checklist includes updating the model ID. The other items are about
+things that will break or quietly change if you stop at the model ID:
+how many tokens a response may use, which parameters the model still
+honours, how caching works, and how long your HTTP client waits.</p>
+<p>My view is that the guide is the better guide to what a release means
+for you. A benchmark tells you how a model behaves on someone else's
+tasks under someone else's settings. The migration guide tells you how
+it will behave inside your code. Teams that treat a new model as a
+config change will learn the difference in production. Teams that treat
+it as a dependency upgrade, with a regression suite and a rollback path,
+will not.</p>
+<p>This article walks through what changed, why each change bites, and a
+short test you can run before you swap the model into anything that
+matters.</p>
+<h2 id="what-the-benchmarks-can-and-cannot-tell-you">What the benchmarks
+can and cannot tell you</h2>
+<p>Start with the claim. In the <a
+href="https://blog.google/innovation-and-ai/products/gemini-app/gemini-4-availability">launch
+post</a>, which is about Argon's availability in the Gemini app and not
+the API, Google says Argon brings "major improvements in coding" and
+"frontier reasoning and improved performance across complex tasks" to
+the app. Those are app claims, not API claims. It talks about a coding
+interface on macOS, a mode where Gemini keeps working while you are
+away, and connections to more than 40 apps. That is a product
+announcement, and it is fine as one. It is not evidence that the model
+will do better on your codebase.</p>
+<p>The numbers come from elsewhere. <a
+href="https://venturebeat.com/technology/google-makes-gemini-4-argon-broadly-available-with-limited-time-low-api-pricing-of-2-10-per-1m-token">VentureBeat's
+coverage</a> separates two kinds of result. It attributes a Vals Index
+ranking to Vals AI, with Argon first on Vals' GDP-weighted index as of
+results from October 12 (rankings move, so check the live leaderboard
+before you quote it), while on Artificial Analysis' index Argon scores
+53, tied with GPT-6 Astra and Claude Fable 5.1 and below Claude Opus
+5.5, Claude Sonnet 5.5 and Meta Muse Wonder Full. It describes the
+strongest results for Argon on other benchmarks as supplied by Google.
+Even in Google's own comparison, Opus 5.5 leads on Terminal-Bench, and
+the article notes that benchmark settings and reasoning configurations
+differ between models.</p>
+<p>So the summary is mixed: first on Vals' GDP-weighted index in the
+October 12 results VentureBeat cited, tied with some models and behind
+others on Artificial Analysis' index, with the strongest numbers on
+other benchmarks coming from the vendor. A mixed picture is normal for
+frontier models, and it is why a ranking cannot decide your migration.
+The model that wins on average can lose on the one task your product
+depends on.</p>
+<p>What you can check is behaviour under your own settings, and that is
+where the migration guide matters.</p>
+<h2 id="the-output-cap-now-includes-thinking">The output cap now
+includes thinking</h2>
+<p>Here is the change I would worry about first. In Google's <a
+href="https://ai.google.dev/gemini-api/docs/latest-model">Argon
+guide</a>, <code>max_output_tokens</code> "sets the total thinking and
+output tokens for a response," and it is a hard limit: the response
+stops once thinking and output together reach it.</p>
+<p>The cap is a per-response total: thinking plus answer must fit in
+this much. (The guide describes this separately from the context window
+for input, thinking and output.) My reading is that if a request makes
+the model think at length, the room left for the answer shrinks, and a
+response can end before it is complete. How often that happens depends
+on your cap and your prompts, which is exactly why you should measure
+it.</p>
+<p>Google addresses the risk directly. Existing apps with a limit below
+32K should raise it to at least 32,768, because "Gemini 4 Argon can
+spend more of the limit on thinking than earlier models." For standard
+tasks it suggests keeping the default or leaving the field unset.</p>
+<p>Think about how this fails. The guide says the response stops once
+the cap is reached. My reading is that if your code does not check why a
+response ended, it may treat the partial text as complete. A JSON answer
+that stops halfway fails to parse, which is the easy case, because
+something complains. The worse case is a cut-off answer that still
+passes your checks: a structured reply whose last field was optional, a
+list that is shorter than it should be, or a generated patch that is
+syntactically valid but missing the second half of the change. Syntax
+checks and tests catch many of these, but only if they cover the part
+that was cut off.</p>
+<p>The defence I would use is cheap, and it is my suggestion, not
+Google's: record why each call ended, using whatever signal your SDK
+exposes, and alert when the share of responses ending at the limit
+moves. I would want that metric whatever model I run. A model change is
+just the moment it stops being optional.</p>
+<p>There is a second effect. The guide says to lower the thinking level
+(<code>low</code>, <code>medium</code> or <code>high</code>, with
+<code>medium</code> as the default) to use fewer tokens. My reading is
+that a small cap does not make the model think less. It makes the model
+run out of room. The thinking level is now part of the model's identity.
+"We use Argon" is an incomplete statement. "We use Argon at low thinking
+with a 32,768 cap" is a configuration you can reproduce.</p>
+<h2 id="parameters-that-are-accepted-and-ignored">Parameters that are
+accepted and ignored</h2>
+<p>The guide's checklist says to remove <code>temperature</code>,
+<code>top_p</code> and <code>top_k</code>. If you provide them, they are
+ignored.</p>
+<p>Ignored is different from rejected. A rejected parameter fails loudly
+on the first request and gets fixed the same day. An ignored one passes
+every test and changes behaviour without raising an error.</p>
+<p>Consider what depends on <code>temperature</code>. A pipeline that
+sets it to zero to get stable output for extraction or classification
+believes it has near-deterministic behaviour. A product that sets it
+high to get varied suggestions believes it has variety. After the swap,
+both settings still sit in the config, both still look right in code
+review, and neither does anything. The extraction pipeline may start
+producing more varied output than anyone intended, and unless you
+compare runs, there is no error to point at the cause.</p>
+<p>Two habits help. First, grep your codebase for the sampling
+parameters before the swap, and delete them for this model so the code
+says what actually happens. Second, if you relied on stability, measure
+it: run the same inputs several times and compare outputs. The way to
+know is to measure it on your inputs.</p>
+<h2
+id="explicit-caching-is-gone-implicit-caching-decides-your-bill">Explicit
+caching is gone; implicit caching decides your bill</h2>
+<p>The guide states that explicit caching, the
+<code>cachedContents</code> API, is not supported for this model. You
+are told to remove calls that create or reference cached content.
+Implicit caching is enabled by default for prompts of at least 4,096
+tokens and discounts cached input tokens on a hit.</p>
+<p>My reading is that this changes engineering, not just accounting.
+With explicit caching you decided what to cache and when. With implicit
+caching, I would test whether repeated prompts actually get cache hits,
+and whether that depends on how your prompts are assembled.</p>
+<p>What follows is my own reasoning, not Google's. I would try putting
+stable content first and variable content last: a long system prompt,
+tool definitions and reference documents on top, the user's message and
+any timestamp at the end. If a template puts a timestamp or a request ID
+near the top, I would test whether that costs you cache hits. Verify it
+against your own usage data and not on my reasoning alone.</p>
+<p>If you had a working explicit cache before, treat its removal as a
+feature you are losing and measure the effect on your real traffic. Do
+not assume the default is an equivalent of explicit caching.</p>
+<h2
+id="longer-responses-change-your-timeouts-and-your-architecture">Longer
+responses change your timeouts and your architecture</h2>
+<p>Argon's input, thinking and output share a single window, and a
+response can run far past what most models allow. According to the
+guide, outputs beyond 64K tokens need background execution with
+<code>max_output_tokens</code> above 65,536, and if you set
+<code>background: true</code> without <code>max_output_tokens</code>,
+the server stops after 64K tokens.</p>
+<p>The guide notes that hard prompts can take several minutes, and says
+to use background execution or set HTTP client timeouts to at least 15
+minutes. A request that may legitimately run that long does not fit
+every setup. You can raise the HTTP timeout if your whole path allows
+it. If a load balancer with a short idle timeout or a serverless
+function with a tight execution limit sits in the way, you cannot, and a
+job model becomes the practical option: submit, store an ID, poll or
+receive a callback, and handle retries without doing the work twice.</p>
+<p>You may never use the long-output mode. My reading is that a model
+that spends more effort on thinking can take longer to answer even when
+the answer is short, so I would check timeouts either way. If your
+client or gateway has a timeout tuned for the previous model, look at it
+before launch. Timeouts that start firing after a model swap are easy to
+blame on the network, so check latency by model first.</p>
+<p>The guide also recommends <code>previous_interaction_id</code> to
+keep multi-turn and function-calling state on the server. That is a
+design choice with trade-offs: it removes the need to resend history,
+but it moves state out of your system, which affects how you log, replay
+and debug conversations. Decide it on purpose.</p>
+<h2 id="a-regression-test-to-run-before-you-swap">A regression test to
+run before you swap</h2>
+<p>None of this needs a research budget. It needs a fixed set of real
+inputs, a way to score the outputs and an hour of discipline. Here is
+the order I would use.</p>
+<ol type="1">
+<li><strong>Freeze a replay set.</strong> Take real requests from your
+logs, with sensitive data removed, and keep their inputs and the outputs
+you considered good. Use the hard and odd cases, not just the typical
+ones.</li>
+<li><strong>Strip the dead settings.</strong> Remove
+<code>temperature</code>, <code>top_p</code> and <code>top_k</code> for
+this model, and remove explicit cache calls, so the config describes
+what actually happens.</li>
+<li><strong>Set the cap deliberately.</strong> Start at no lower than
+32,768 for anything that thinks, and record the value in the config next
+to the model ID.</li>
+<li><strong>Compare thinking levels.</strong> I would evaluate all three
+and keep the lowest that meets your quality bar. Running every input at
+every level multiplies cost and time. For a large replay set, run a
+representative slice at all three levels first, then run the full set at
+the one or two candidates. Run everything at all levels when the task is
+high-stakes or the slice shows quality changing between levels.</li>
+<li><strong>Count truncations.</strong> For each run, record how many
+responses ended at the token limit and how many outputs failed to parse.
+Both should be zero or explained.</li>
+<li><strong>Check latency at the tail.</strong> Look at your slowest
+responses, not the average, and compare them with your client and
+gateway timeouts.</li>
+<li><strong>Repeat each input a few times</strong> if you depended on
+stable output, and compare the runs with each other.</li>
+<li><strong>Keep the old model as a fallback</strong> behind a flag
+until the new one has handled real traffic.</li>
+</ol>
+<p>A few lines of configuration show the end state. This is pseudocode
+with illustrative field names, not a specific SDK call or a supported
+file format:</p>
+<pre class="yaml"><code>model: gemini-4-argon
+thinking_level: medium        # tested at low, medium, high
+max_output_tokens: 32768      # covers thinking + answer
+# removed for this model: temperature, top_p, top_k, cached_content
+timeout_seconds: 900
+fallback_model: &lt;your previous model&gt;</code></pre>
+<p>If the config reads like this, a reviewer can see what the model is
+being asked to do. If it still carries a <code>temperature: 0</code>
+that does nothing, it describes behaviour you no longer have.</p>
+<h2 id="use-rankings-to-shortlist-your-replay-set-to-decide">Use
+rankings to shortlist, your replay set to decide</h2>
+<p>The usual advice on a release like this is to wait for the
+leaderboards to settle. I think that is the wrong first move for an
+engineering team. Leaderboards answer whether a model is good. They
+cannot answer whether your system survives the change, and the second
+question is the one that produces incidents. A model that is a few
+points better on a public index but truncates your JSON is worse for
+you. A model that is a few points worse but drops into your pipeline
+unchanged may be the better pick.</p>
+<p>There is a fair counter-argument: without benchmarks, how do you
+decide which models deserve a migration at all? You still need a filter.
+Public results are good at saying "this may be worth an hour." They are
+bad at saying "ship it."</p>
+<p>Another objection is that the replay test costs engineering time a
+small team may not have. True. But it is a one-time cost that you reuse
+on every future model, and the test for Argon is the test for the next
+release as well.</p>
+<p>If you call Gemini through the API, do not move production traffic to
+Argon because it launched, and do not stay put because it is new. Build
+the replay set, run the steps above, and decide on your own results. If
+you use a different provider, the lesson carries over: every model
+change can alter token accounting, parameter handling, caching and
+latency. The model ID is the smallest part of the diff.</p>
+<h2 id="sources">Sources</h2>
+<ul>
+<li><a href="https://ai.google.dev/gemini-api/docs/changelog">Gemini API
+release notes</a></li>
+<li><a
+href="https://blog.google/innovation-and-ai/products/gemini-app/gemini-4-availability">Gemini
+4 Argon availability in the Gemini app (Google)</a></li>
+<li><a href="https://ai.google.dev/gemini-api/docs/latest-model">What's
+new in Gemini 4 Argon (Google AI for Developers)</a></li>
+<li><a
+href="https://venturebeat.com/technology/google-makes-gemini-4-argon-broadly-available-with-limited-time-low-api-pricing-of-2-10-per-1m-token">Google
+makes Gemini 4 Argon broadly available (VentureBeat)</a></li>
+</ul>
+
+</article>
+<footer class="site">
+<p>Written by Ardiansyah Iqbal. Find me on <a href="https://www.linkedin.com/in/ardiansyah-iqbal-9106ab2b3/">LinkedIn</a>.</p>
+</footer>
+</body>
+</html>

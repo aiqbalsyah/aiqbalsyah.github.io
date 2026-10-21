@@ -1,0 +1,6 @@
+{
+  "title": "Gemini 4 Argon: The Model ID Is the Easy Part of Migrating",
+  "subtitle": "Google's own migration guide shows that output caps, ignored parameters and caching changed, so a model swap needs a regression test, not a benchmark table.",
+  "date": "2026-10-23",
+  "slug": "gemini-4-argon-the-model-id-is-the-easy-part-of-migrating"
+}
